@@ -1,0 +1,21 @@
+# Core
+requests>=2.31,<3
+python-dotenv>=1.0,<2
+
+# Azure AI Search (write path - stable merge_or_upload_documents API)
+azure-search-documents>=11.5.1,<12
+azure-core>=1.30,<2
+
+# Azure OpenAI embeddings
+openai>=1.30,<2
+
+# Watermark on Blob Storage (optional in dev, used in cloud)
+azure-storage-blob>=12.19,<13
+
+# Azure Functions runtime (only needed for the cloud deployment)
+azure-functions>=1.18,<2
+
+# NOTA: ambiente di sviluppo rilevato su Python 3.14. Se l'installazione di un
+# pacchetto Azure fallisce per mancanza di wheel, aggiornare pip
+# (python -m pip install -U pip) e, se necessario, usare un virtualenv con
+# Python 3.11 (runtime supportato anche da Azure Functions).

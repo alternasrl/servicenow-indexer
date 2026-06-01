@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Secrets / config locale
+.env
+local.settings.json
+
+# Stato runtime (watermark locale)
+.state/
+
+# Azure Functions
+bin/
+obj/
+.python_packages/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude Code (preferenze locali)
+.claude/settings.local.json
+
+# File temporanei / log di diagnostica
+*.log
+pyver.txt
+result.txt
+test_results.txt
+pip.log
+pytest.log
