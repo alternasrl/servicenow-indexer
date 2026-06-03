@@ -57,20 +57,44 @@ def to_iso8601_z(sn_datetime: str) -> Optional[str]:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def build_header(
+    number: str,
+    assignment_group_name: str = "",
+    closed_at_iso: str = "",
+) -> str:
+    """Header di citazione anteposto al content.
+
+    Serve perche' Copilot Studio non espone il mapping dei campi: passa al
+    modello solo title/content. Inserendo numero ticket, gruppo e data chiusura
+    DENTRO il content, il modello puo' sempre citare il ticket di riferimento.
+    """
+    bits = [f"Ticket {number}"] if number else []
+    if assignment_group_name:
+        bits.append(f"Gruppo: {assignment_group_name}")
+    if closed_at_iso:
+        # Solo la data (YYYY-MM-DD) per leggibilita'.
+        bits.append(f"Chiuso: {closed_at_iso[:10]}")
+    return " | ".join(bits)
+
+
 def build_content(
     short_description: str,
     description: str,
     resolution: str,
     work_notes: str = "",
     comments: str = "",
+    header: str = "",
 ) -> str:
     """Concatena i campi testuali nel contenuto indicizzato.
 
     Oltre a problema/descrizione/risoluzione include le note interne tecniche
     (work_notes) e i commenti col cliente (comments), che spesso contengono la
     vera conoscenza risolutiva. Tutti i campi devono arrivare gia' rediretti.
+    Un eventuale `header` (numero ticket + metadati) viene anteposto.
     """
     parts = []
+    if header:
+        parts.append(header)
     if short_description:
         parts.append(f"Problema: {short_description}")
     if description:
@@ -96,8 +120,16 @@ def transform_record(record: dict, redactor: Optional[Redactor] = None) -> dict:
     work_notes = redactor.redact(_display(record, "work_notes"))
     comments = redactor.redact(_display(record, "comments"))
 
+    assignment_group_name = _display(record, "assignment_group")
+    closed_at = to_iso8601_z(_value(record, "closed_at"))
+
+    # Header di citazione (numero ticket + gruppo + data) dentro il content:
+    # Copilot Studio passa al modello solo title/content, quindi mettiamo qui le
+    # info per la citazione, altrimenti l'agente non conosce il numero ticket.
+    header = build_header(number, assignment_group_name, closed_at)
+
     content = build_content(
-        short_description, description, resolution, work_notes, comments
+        short_description, description, resolution, work_notes, comments, header
     )
 
     doc = {
@@ -111,12 +143,12 @@ def transform_record(record: dict, redactor: Optional[Redactor] = None) -> dict:
         "content": content,
         # NB: cmdb_ci su Amplifon e' sistematicamente vuoto -> non indicizzato.
         "assignment_group": _value(record, "assignment_group"),
-        "assignment_group_name": _display(record, "assignment_group"),
+        "assignment_group_name": assignment_group_name,
         # Metadati di severita' (display_value leggibile, es. "4 - Low").
         "priority": _display(record, "priority"),
         "impact": _display(record, "impact"),
         "urgency": _display(record, "urgency"),
-        "closed_at": to_iso8601_z(_value(record, "closed_at")),
+        "closed_at": closed_at,
     }
     return doc
 

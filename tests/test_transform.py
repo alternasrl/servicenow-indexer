@@ -2,6 +2,7 @@
 
 from pipeline.transform import (
     build_content,
+    build_header,
     make_document_id,
     to_iso8601_z,
     transform_record,
@@ -58,6 +59,22 @@ def test_build_content_omits_empty_journal():
     content = build_content("p", "d", "r")
     assert "Note di lavorazione" not in content
     assert "Commenti" not in content
+
+
+def test_build_header():
+    h = build_header("INC0012345", "HD Oracle L2", "2024-03-01T09:00:00Z")
+    assert "Ticket INC0012345" in h
+    assert "Gruppo: HD Oracle L2" in h
+    assert "Chiuso: 2024-03-01" in h
+    # niente parte oraria nella data
+    assert "09:00:00" not in h
+
+
+def test_content_starts_with_ticket_header():
+    doc = transform_record(_record())
+    # il content deve aprire con l'header che cita il numero ticket
+    assert doc["content"].startswith("Ticket INC0012345")
+    assert "Gruppo: HD Oracle L2" in doc["content"]
 
 
 def test_transform_record_maps_fields_and_redacts():
