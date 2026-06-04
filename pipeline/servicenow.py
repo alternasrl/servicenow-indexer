@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 # comments) che contengono la vera conoscenza risolutiva, e i metadati di
 # severita' (priority/impact/urgency).
 DEFAULT_FIELDS = [
+    "sys_id",              # per costruire il link diretto all'incident
     "number",
     "short_description",
     "description",

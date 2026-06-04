@@ -151,7 +151,7 @@ def main(argv=None) -> int:
     max_updated = None
     for record in client.iter_records(watermark=watermark, max_records=args.sample):
         count += 1
-        doc = transform_record(record)
+        doc = transform_record(record, base_url=config.base_url)
         max_updated = record_updated_on(record) or max_updated
         if first_doc is None:
             first_doc = doc

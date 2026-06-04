@@ -50,6 +50,13 @@ def build_index_definition(index_name: str, embedding: EmbeddingConfig) -> Dict:
                 "retrievable": True,
             },
             {
+                # URL diretto all'incident, per le citazioni. Non searchable.
+                "name": "url",
+                "type": "Edm.String",
+                "searchable": False,
+                "retrievable": True,
+            },
+            {
                 "name": "short_description",
                 "type": "Edm.String",
                 "searchable": True,
@@ -242,6 +249,25 @@ class SearchIndexManager:
             logger.error("Creazione indice fallita: %s %s", resp.status_code, resp.text)
             resp.raise_for_status()
         logger.info("Indice '%s' creato", self.search.index_name)
+
+    def update_index(self) -> None:
+        """Aggiorna lo schema dell'indice (PUT) creandolo se assente.
+
+        Azure AI Search consente di AGGIUNGERE nuovi campi a un indice esistente
+        senza re-indicizzare (i campi gia' presenti non vanno rimossi/modificati
+        in modo incompatibile). Utile quando lo schema evolve, es. nuovo campo
+        `url`. I documenti esistenti avranno il nuovo campo vuoto finche' non
+        vengono riscritti dalla pipeline.
+        """
+        definition = build_index_definition(self.search.index_name, self.embedding)
+        resp = requests.put(
+            self._index_url(), headers=self._build_headers(), json=definition, timeout=60
+        )
+        # 200/201 = creato/aggiornato con corpo; 204 = aggiornato senza corpo.
+        if resp.status_code not in (200, 201, 204):
+            logger.error("Aggiornamento indice fallito: %s %s", resp.status_code, resp.text)
+            resp.raise_for_status()
+        logger.info("Indice '%s' aggiornato (schema)", self.search.index_name)
 
 
 class SearchWriter:

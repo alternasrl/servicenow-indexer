@@ -135,11 +135,12 @@ class Pipeline:
         # 3) Estrazione + trasformazione.
         documents: List[dict] = []
         new_watermark = stats.previous_watermark
+        base_url = self.config.servicenow.base_url
         for record in self.sn_client.iter_records(
             watermark=read_watermark, max_records=max_records
         ):
             stats.read += 1
-            doc = transform_record(record, self.redactor)
+            doc = transform_record(record, self.redactor, base_url=base_url)
             updated_on = record_updated_on(record)
             new_watermark = max_watermark(new_watermark, updated_on)
             if not doc.get("content"):

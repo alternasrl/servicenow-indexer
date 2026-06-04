@@ -20,6 +20,7 @@ def test_index_has_expected_fields():
     expected = {
         "id",
         "number",
+        "url",
         "short_description",
         "description",
         "resolution",

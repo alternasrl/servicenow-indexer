@@ -3,10 +3,30 @@
 from pipeline.transform import (
     build_content,
     build_header,
+    build_incident_url,
     make_document_id,
     to_iso8601_z,
     transform_record,
+    truncate_bytes,
 )
+
+
+def test_truncate_bytes_limits_size():
+    text = "x" * 100000
+    out = truncate_bytes(text, max_bytes=1000)
+    assert len(out.encode("utf-8")) <= 1000
+
+
+def test_truncate_bytes_keeps_short_text():
+    assert truncate_bytes("breve") == "breve"
+
+
+def test_truncate_bytes_no_broken_multibyte():
+    # carattere multibyte (3 byte in UTF-8) ripetuto: il taglio non deve spezzarlo
+    text = "à" * 1000  # 'à' = 2 byte
+    out = truncate_bytes(text, max_bytes=101)  # taglio "scomodo"
+    # decodifica valida (nessun carattere spezzato)
+    assert out == out.encode("utf-8").decode("utf-8")
 
 
 def _record():
@@ -26,6 +46,7 @@ def _record():
             "value": "Gentile utente, risolto.",
             "display_value": "Gentile utente, risolto.",
         },
+        "sys_id": {"value": "abc123sysid", "display_value": "abc123sysid"},
         "assignment_group": {"value": "grp-sysid-1", "display_value": "HD Oracle L2"},
         "priority": {"value": "4", "display_value": "4 - Low"},
         "impact": {"value": "3", "display_value": "3 - Low"},
@@ -62,12 +83,29 @@ def test_build_content_omits_empty_journal():
 
 
 def test_build_header():
-    h = build_header("INC0012345", "HD Oracle L2", "2024-03-01T09:00:00Z")
+    h = build_header(
+        "INC0012345",
+        "HD Oracle L2",
+        "2024-03-01T09:00:00Z",
+        "https://acme.service-now.com/nav_to.do?uri=incident.do?sys_id=x",
+    )
     assert "Ticket INC0012345" in h
     assert "Gruppo: HD Oracle L2" in h
     assert "Chiuso: 2024-03-01" in h
+    assert "Link: https://acme.service-now.com" in h
     # niente parte oraria nella data
     assert "09:00:00" not in h
+
+
+def test_build_incident_url():
+    base = "https://acme.service-now.com"
+    url = build_incident_url(base, "abc123sysid", "INC0012345")
+    assert url == "https://acme.service-now.com/nav_to.do?uri=incident.do?sys_id=abc123sysid"
+    # fallback per numero se manca il sys_id
+    url2 = build_incident_url(base, "", "INC0012345")
+    assert "number=INC0012345" in url2
+    # senza sys_id ne' number -> stringa vuota
+    assert build_incident_url(base, "", "") == ""
 
 
 def test_content_starts_with_ticket_header():
@@ -75,6 +113,18 @@ def test_content_starts_with_ticket_header():
     # il content deve aprire con l'header che cita il numero ticket
     assert doc["content"].startswith("Ticket INC0012345")
     assert "Gruppo: HD Oracle L2" in doc["content"]
+
+
+def test_transform_record_includes_url_with_base():
+    doc = transform_record(_record(), base_url="https://acme.service-now.com")
+    assert doc["url"].endswith("sys_id=abc123sysid")
+    assert "Link: https://acme.service-now.com" in doc["content"]
+
+
+def test_transform_record_url_empty_without_base():
+    doc = transform_record(_record())
+    assert doc["url"] == ""
+    assert "Link:" not in doc["content"]
 
 
 def test_transform_record_maps_fields_and_redacts():

@@ -165,6 +165,13 @@ class EmbeddingConfig:
     dimensions: int = 1536
     api_version: str = "2024-02-01"
     batch_size: int = 16
+    # Limite TOKEN del testo inviato all'embedding. Il modello accetta max 8192
+    # token; usiamo 8000 di margine. Il troncamento e' fatto contando i token
+    # reali (tiktoken) quando disponibile, con fallback per caratteri.
+    max_input_tokens: int = 8000
+    # Fallback per caratteri se tiktoken non e' installato (stima ~3 char/token
+    # nel caso peggiore di testo denso: SQL, codici, ID).
+    max_input_chars: int = 24000
 
     @staticmethod
     def from_env() -> "EmbeddingConfig":
@@ -177,6 +184,8 @@ class EmbeddingConfig:
             dimensions=_get_int("AOAI_DIMENSIONS", 1536),
             api_version=_get("AOAI_API_VERSION", "2024-02-01"),
             batch_size=_get_int("AOAI_BATCH_SIZE", 16),
+            max_input_tokens=_get_int("AOAI_MAX_INPUT_TOKENS", 8000),
+            max_input_chars=_get_int("AOAI_MAX_INPUT_CHARS", 24000),
         )
 
 

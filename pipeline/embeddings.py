@@ -30,11 +30,45 @@ class EmbeddingClient:
                 api_key=config.api_key,
                 api_version=config.api_version,
             )
+        # Encoder per il conteggio token reale (tiktoken). Se non disponibile,
+        # si ricade sul troncamento per caratteri.
+        self._encoding = None
+        try:
+            import tiktoken  # import lazy
+
+            try:
+                self._encoding = tiktoken.encoding_for_model(config.model)
+            except KeyError:
+                # Modello non mappato: cl100k_base copre gli embedding moderni.
+                self._encoding = tiktoken.get_encoding("cl100k_base")
+        except Exception:  # pragma: no cover - tiktoken opzionale
+            logger.warning(
+                "tiktoken non disponibile: troncamento embedding per caratteri "
+                "(meno preciso)."
+            )
+
+    def _truncate(self, text: str) -> str:
+        """Tronca il testo al limite di token ammesso dall'embedding.
+
+        Il modello accetta max 8192 token in input. Con tiktoken si tronca al
+        numero di token reale (preciso); altrimenti si ricade sul limite di
+        caratteri. Il content completo resta nell'indice: si limita solo l'input
+        embedding.
+        """
+        if self._encoding is not None:
+            tokens = self._encoding.encode(text)
+            if len(tokens) > self.config.max_input_tokens:
+                return self._encoding.decode(tokens[: self.config.max_input_tokens])
+            return text
+        limit = self.config.max_input_chars
+        if limit and len(text) > limit:
+            return text[:limit]
+        return text
 
     def _embed_batch(self, texts: List[str]) -> List[List[float]]:
         response = self._client.embeddings.create(
             model=self.config.deployment,
-            input=texts,
+            input=[self._truncate(t) for t in texts],
             dimensions=self.config.dimensions,
         )
         # L'API garantisce l'ordine, ma ordiniamo per index per sicurezza.

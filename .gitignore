@@ -24,8 +24,8 @@ obj/
 .DS_Store
 Thumbs.db
 
-# Claude Code (preferenze locali)
-.claude/settings.local.json
+# Claude Code (stato/preferenze locali)
+.claude/
 
 # File temporanei / log di diagnostica
 *.log

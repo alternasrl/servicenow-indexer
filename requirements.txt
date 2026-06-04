@@ -8,6 +8,8 @@ azure-core>=1.30,<2
 
 # Azure OpenAI embeddings
 openai>=1.30,<2
+# Conteggio token preciso per troncare l'input embedding (limite 8192 token)
+tiktoken>=0.7,<1
 
 # Watermark on Blob Storage (optional in dev, used in cloud)
 azure-storage-blob>=12.19,<13

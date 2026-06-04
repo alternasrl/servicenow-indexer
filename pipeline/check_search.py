@@ -37,6 +37,12 @@ def parse_args(argv=None):
         action="store_true",
         help="Elimina l'indice esistente e lo ricrea (ATTENZIONE: perde i dati).",
     )
+    p.add_argument(
+        "--update-schema",
+        action="store_true",
+        help="Aggiorna lo schema dell'indice esistente (aggiunge nuovi campi, "
+        "es. 'url') senza perdere i dati.",
+    )
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args(argv)
 
@@ -106,8 +112,12 @@ def main(argv=None) -> int:
         print("  Indice eliminato.")
         exists = False
 
-    print("\n=== ENSURE INDEX ===")
-    manager.ensure_index()
+    if args.update_schema and exists:
+        print("\n=== UPDATE SCHEMA ===")
+        manager.update_index()
+    else:
+        print("\n=== ENSURE INDEX ===")
+        manager.ensure_index()
 
     # 3) Riepilogo campi.
     definition = build_index_definition(search.index_name, embedding)

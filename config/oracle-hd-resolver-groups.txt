@@ -1,0 +1,26 @@
+# Perimetro resolver group — Help Desk Oracle L2
+# Fonte: Lorella (business), confermato il 2026-06.
+#
+# Mapping nome gruppo -> sys_id (campo assignment_group dell'incident).
+# Per usarli, copiare la lista CSV in fondo nella variabile d'ambiente
+# SERVICENOW_RESOLVER_GROUPS del file .env (o nelle App Settings).
+#
+# Verifica/aggiornamento sys_id: python -m pipeline.list_groups --contains <termine>
+
+# nome gruppo                              | sys_id
+1AT - Integration Support                  | 03f7f352db9dc81053b97dad68961929
+1AT - Procurement and SCM                  | a8cca9ad1b310850e7a920676e4bcb13
+1AT - User Profiling                       | cfde7716db9dc81053b97dad6896199e
+1AT - HCM Support                          | f726bf9edb5dc81053b97dad6896199d
+1AT - Oracle PRM                           | 52f5b67cdb5e8d1009c7917bd3961959
+1AT - Financials                           | 32ccadad1b310850e7a920676e4bcb81
+1AT - Product HUB                          | 7c1a21e51bfdc450e7a920676e4bcbf0
+1AT - Incentive Compensation               | 22a852a51b5fdd102ac736d5464bcba2
+GLOBAL - Deloitte Onboarding Module - 2L   | a7b1ca4e1b22ad902ac736d5464bcb0e
+Deloitte JDE                               | b0faeb2c4f65ef00af45c9318110c7b4
+Deloitte ORC Support                       | d0eae9d3db4aaf00b61470cbbf961986
+Deloitte RPA                               | 670231c8db60649074603313f396197c
+1AT - DEL - Security L1                     | 0116277fc37b6694a77c5784e40131df
+
+# --- Da incollare in SERVICENOW_RESOLVER_GROUPS (CSV, senza spazi) ---
+# 03f7f352db9dc81053b97dad68961929,a8cca9ad1b310850e7a920676e4bcb13,cfde7716db9dc81053b97dad6896199e,f726bf9edb5dc81053b97dad6896199d,52f5b67cdb5e8d1009c7917bd3961959,32ccadad1b310850e7a920676e4bcb81,7c1a21e51bfdc450e7a920676e4bcbf0,22a852a51b5fdd102ac736d5464bcba2,a7b1ca4e1b22ad902ac736d5464bcb0e,b0faeb2c4f65ef00af45c9318110c7b4,d0eae9d3db4aaf00b61470cbbf961986,670231c8db60649074603313f396197c,0116277fc37b6694a77c5784e40131df

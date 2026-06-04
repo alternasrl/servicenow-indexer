@@ -23,6 +23,25 @@ logger = logging.getLogger(__name__)
 # Caratteri ammessi nella chiave di Azure AI Search: lettere, cifre, _, -, =.
 _KEY_INVALID = re.compile(r"[^A-Za-z0-9_\-=]")
 
+# Limite Azure AI Search: un termine UTF-8 non puo' superare 32766 byte.
+# Teniamo un margine prudente per i campi testuali lunghi (journal, content).
+MAX_FIELD_BYTES = 30000
+
+
+def truncate_bytes(text: str, max_bytes: int = MAX_FIELD_BYTES) -> str:
+    """Tronca una stringa in modo che non superi `max_bytes` in UTF-8.
+
+    Evita l'errore di Azure AI Search sui campi con termini troppo grandi e non
+    spezza i caratteri multibyte. I journal restano comunque interi nel testo
+    originale ServiceNow; qui si limita solo il valore indicizzato.
+    """
+    if not text:
+        return text
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
 
 def make_document_id(number: str) -> str:
     """Deriva l'id documento dal numero ticket ripulendo i caratteri non ammessi."""
@@ -57,16 +76,31 @@ def to_iso8601_z(sn_datetime: str) -> Optional[str]:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def build_incident_url(base_url: str, sys_id: str, number: str = "") -> str:
+    """URL diretto all'incident in ServiceNow.
+
+    Forma standard: <base>/nav_to.do?uri=incident.do?sys_id=<sys_id>
+    Se manca il sys_id ma c'e' il numero, usa la ricerca per numero.
+    """
+    base = base_url.rstrip("/")
+    if sys_id:
+        return f"{base}/nav_to.do?uri=incident.do?sys_id={sys_id}"
+    if number:
+        return f"{base}/incident.do?sysparm_query=number={number}"
+    return ""
+
+
 def build_header(
     number: str,
     assignment_group_name: str = "",
     closed_at_iso: str = "",
+    url: str = "",
 ) -> str:
     """Header di citazione anteposto al content.
 
     Serve perche' Copilot Studio non espone il mapping dei campi: passa al
-    modello solo title/content. Inserendo numero ticket, gruppo e data chiusura
-    DENTRO il content, il modello puo' sempre citare il ticket di riferimento.
+    modello solo title/content. Inserendo numero ticket, gruppo, data e LINK
+    DENTRO il content, il modello puo' sempre citare il ticket e riportare l'URL.
     """
     bits = [f"Ticket {number}"] if number else []
     if assignment_group_name:
@@ -74,6 +108,8 @@ def build_header(
     if closed_at_iso:
         # Solo la data (YYYY-MM-DD) per leggibilita'.
         bits.append(f"Chiuso: {closed_at_iso[:10]}")
+    if url:
+        bits.append(f"Link: {url}")
     return " | ".join(bits)
 
 
@@ -108,11 +144,20 @@ def build_content(
     return "\n\n".join(parts).strip()
 
 
-def transform_record(record: dict, redactor: Optional[Redactor] = None) -> dict:
-    """Trasforma un record ServiceNow in un documento per l'indice."""
+def transform_record(
+    record: dict,
+    redactor: Optional[Redactor] = None,
+    base_url: str = "",
+) -> dict:
+    """Trasforma un record ServiceNow in un documento per l'indice.
+
+    `base_url` (es. https://acme.service-now.com) serve a costruire il link
+    diretto all'incident, inserito nell'header del content e nel campo `url`.
+    """
     redactor = redactor or default_redactor
 
     number = _value(record, "number") or _display(record, "number")
+    sys_id = _value(record, "sys_id")
     short_description = redactor.redact(_display(record, "short_description"))
     description = redactor.redact(_display(record, "description"))
     resolution = redactor.redact(_display(record, "close_notes"))
@@ -122,11 +167,12 @@ def transform_record(record: dict, redactor: Optional[Redactor] = None) -> dict:
 
     assignment_group_name = _display(record, "assignment_group")
     closed_at = to_iso8601_z(_value(record, "closed_at"))
+    url = build_incident_url(base_url, sys_id, number) if base_url else ""
 
-    # Header di citazione (numero ticket + gruppo + data) dentro il content:
-    # Copilot Studio passa al modello solo title/content, quindi mettiamo qui le
-    # info per la citazione, altrimenti l'agente non conosce il numero ticket.
-    header = build_header(number, assignment_group_name, closed_at)
+    # Header di citazione (numero ticket + gruppo + data + link) dentro il
+    # content: Copilot Studio passa al modello solo title/content, quindi mettiamo
+    # qui le info per la citazione e l'URL dell'incident.
+    header = build_header(number, assignment_group_name, closed_at, url)
 
     content = build_content(
         short_description, description, resolution, work_notes, comments, header
@@ -135,12 +181,13 @@ def transform_record(record: dict, redactor: Optional[Redactor] = None) -> dict:
     doc = {
         "id": make_document_id(number),
         "number": number,
+        "url": url,
         "short_description": short_description,
-        "description": description,
-        "resolution": resolution,
-        "work_notes": work_notes,
-        "comments": comments,
-        "content": content,
+        "description": truncate_bytes(description),
+        "resolution": truncate_bytes(resolution),
+        "work_notes": truncate_bytes(work_notes),
+        "comments": truncate_bytes(comments),
+        "content": truncate_bytes(content),
         # NB: cmdb_ci su Amplifon e' sistematicamente vuoto -> non indicizzato.
         "assignment_group": _value(record, "assignment_group"),
         "assignment_group_name": assignment_group_name,
