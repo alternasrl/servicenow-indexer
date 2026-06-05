@@ -23,16 +23,28 @@ app = func.FunctionApp()
 
 @app.function_name(name="nightly_delta")
 @app.timer_trigger(
-    schedule="0 0 2 * * *",  # ogni giorno alle 02:00
+    schedule="0 0 2 * * *",  # ogni giorno alle 02:00 (delta: ticket chiusi/modificati)
     arg_name="timer",
     run_on_startup=False,
     use_monitor=True,
 )
 def nightly_delta(timer: func.TimerRequest) -> None:
+    """Corsa notturna: indicizza i ticket modificati dopo l'ultimo watermark.
+
+    In cloud il watermark DEVE essere su Blob Storage (le Functions sono
+    stateless): valorizzare WATERMARK_BLOB_CONNECTION_STRING (o riusare
+    AzureWebJobsStorage). Senza Blob, ogni esecuzione ripartirebbe da zero.
+    """
+    if timer.past_due:
+        logging.warning("Timer in ritardo (past_due): esecuzione comunque avviata")
     logging.info("Timer trigger: avvio run delta notturno")
-    config = AppConfig.from_env()
-    stats = Pipeline(config=config).run()
-    logging.info("Run delta completato: %s", stats.as_dict())
+    try:
+        config = AppConfig.from_env()
+        stats = Pipeline(config=config).run()
+        logging.info("Run delta completato: %s", stats.as_dict())
+    except Exception:
+        logging.exception("Run delta notturno FALLITO")
+        raise
 
 
 @app.function_name(name="manual_backfill")

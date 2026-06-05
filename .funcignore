@@ -1,0 +1,14 @@
+.git*
+.venv
+venv/
+.env
+local.settings.json
+.state/
+tests/
+*.log
+__pycache__/
+.pytest_cache/
+.claude/
+scripts/
+config/evaluation_*.csv
+*.md
