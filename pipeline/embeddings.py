@@ -25,10 +25,14 @@ class EmbeddingClient:
         else:
             from openai import AzureOpenAI  # import lazy
 
+            # timeout esplicito + retry: evita hang infiniti come quello osservato
+            # in un run (chiamata embedding rimasta appesa per ore).
             self._client = AzureOpenAI(
                 azure_endpoint=config.endpoint,
                 api_key=config.api_key,
                 api_version=config.api_version,
+                timeout=60.0,
+                max_retries=5,
             )
         # Encoder per il conteggio token reale (tiktoken). Se non disponibile,
         # si ricade sul troncamento per caratteri.

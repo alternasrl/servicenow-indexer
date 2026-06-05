@@ -198,26 +198,52 @@ class LlmPiiRedactor:
         self.mask = mask
         self.max_chars = max_chars
         self._client = client
+        # Contatori thread-safe (la redaction gira in parallelo).
+        import threading
+
+        self._lock = threading.Lock()
+        self.values_masked = 0  # quanti VALORI PII distinti mascherati
+        self.occurrences_masked = 0  # quante OCCORRENZE totali sostituite
+        self.docs_with_pii = 0  # quanti documenti contenevano PII
+        self.failures = 0  # quante redaction sono FALLITE (testo non redatto!)
+
+    @property
+    def stats(self) -> dict:
+        return {
+            "values_masked": self.values_masked,
+            "occurrences_masked": self.occurrences_masked,
+            "docs_with_pii": self.docs_with_pii,
+            "failures": self.failures,
+        }
 
     def _ensure_client(self):
         if self._client is None:
             from openai import AzureOpenAI  # import lazy
 
+            # timeout + retry alti: i 429 (rate limit) vanno assorbiti con backoff,
+            # NON lasciati cadere (lascerebbero testo non redatto = PII esposta).
             self._client = AzureOpenAI(
                 azure_endpoint=self.endpoint,
                 api_key=self.api_key,
                 api_version=self.api_version,
+                timeout=60.0,
+                max_retries=8,
             )
         return self._client
 
     def _extract_pii(self, text: str) -> list:
-        """Chiede all'LLM la lista dei valori PII presenti nel testo (JSON)."""
+        """Chiede all'LLM la lista dei valori PII presenti nel testo (JSON).
+
+        max_tokens ampio per non troncare l'output (l'errore 'Unterminated string'
+        nasceva da risposte JSON tagliate su testi con moltissimi PII).
+        """
         import json
 
         client = self._ensure_client()
         resp = client.chat.completions.create(
             model=self.deployment,
             temperature=0,
+            max_tokens=4096,
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": LLM_PII_SYSTEM_PROMPT.format(mask=self.mask)},
@@ -232,20 +258,37 @@ class LlmPiiRedactor:
         uniq = {v for v in values if isinstance(v, str) and v.strip()}
         return sorted(uniq, key=len, reverse=True)
 
-    def redact(self, text: str | None, language: str = "it") -> str:
+    class RedactionError(RuntimeError):
+        """Sollevata quando la redaction PII fallisce (testo NON redatto)."""
+
+    def redact(self, text: str | None, language: str = "it", raise_on_error: bool = False) -> str:
         if not text:
             return ""
         snippet = text if len(text) <= self.max_chars else text[: self.max_chars]
         try:
             pii_values = self._extract_pii(snippet)
-        except Exception as exc:  # pragma: no cover - dipende dal servizio
-            logger.warning("Errore estrazione PII via LLM, testo invariato: %s", exc)
+        except Exception as exc:
+            with self._lock:
+                self.failures += 1
+            logger.warning("Redaction PII FALLITA (testo NON redatto): %s", exc)
+            if raise_on_error:
+                raise LlmPiiRedactor.RedactionError(str(exc)) from exc
             return text
         if not pii_values:
             return text
         out = text
+        occ = 0
         for value in pii_values:
-            out = out.replace(value, self.mask)
+            count = out.count(value)
+            if count:
+                out = out.replace(value, self.mask)
+                occ += count
+        # Aggiorna i contatori in modo thread-safe.
+        with self._lock:
+            self.values_masked += len(pii_values)
+            self.occurrences_masked += occ
+            if occ:
+                self.docs_with_pii += 1
         return out
 
 

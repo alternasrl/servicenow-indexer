@@ -42,6 +42,9 @@ class RunStats:
     previous_watermark: Optional[str] = None
     new_watermark: Optional[str] = None
     mode: str = "delta"
+    pii_occurrences_masked: int = 0
+    pii_values_masked: int = 0
+    pii_docs_with_pii: int = 0
 
     def as_dict(self) -> dict:
         return {
@@ -52,6 +55,9 @@ class RunStats:
             "written": self.written,
             "previous_watermark": self.previous_watermark,
             "new_watermark": self.new_watermark,
+            "pii_occurrences_masked": self.pii_occurrences_masked,
+            "pii_values_masked": self.pii_values_masked,
+            "pii_docs_with_pii": self.pii_docs_with_pii,
         }
 
 
@@ -116,7 +122,9 @@ class Pipeline:
         pii = getattr(self.redactor, "pii_redactor", None)
         if pii is None or not documents:
             return
-        workers = int(os.environ.get("PII_CONCURRENCY", "16"))
+        # Concorrenza piu' prudente di default: troppi thread saturano il rate
+        # limit del deployment (tempesta di 429). Sovrascrivibile via env.
+        workers = int(os.environ.get("PII_CONCURRENCY", "8"))
 
         # Pre-inizializza il client PRIMA del ThreadPool: il lazy-init concorrente
         # serializzerebbe il primo batch di thread (ognuno crea il client).
@@ -127,19 +135,68 @@ class Pipeline:
             except Exception:  # pragma: no cover
                 pass
 
-        def redact_doc(doc: dict) -> None:
+        total = len(documents)
+        done = {"n": 0}
+        lock_done = __import__("threading").Lock()
+        step = max(1, total // 20)  # log ~ogni 5%
+
+        def redact_doc(doc: dict) -> bool:
+            """Ritorna True se ok, False se la redaction e' fallita."""
+            ok = True
             val = doc.get("content")
             if val:
-                doc["content"] = pii.redact(val)
+                try:
+                    doc["content"] = pii.redact(val, raise_on_error=True)
+                except Exception:
+                    ok = False  # gia' contato/loggato dentro redact
+            with lock_done:
+                done["n"] += 1
+                if done["n"] % step == 0 or done["n"] == total:
+                    logger.info(
+                        "PII: %s/%s documenti | dati sensibili rimossi finora: %s "
+                        "(in %s ticket) | falliti: %s",
+                        done["n"], total, pii.occurrences_masked,
+                        pii.docs_with_pii, pii.failures,
+                    )
+            return ok
 
         logger.info(
-            "Redaction PII (LLM) su %s documenti, concorrenza=%s...",
-            len(documents),
-            workers,
+            "Redaction PII (LLM) su %s documenti, concorrenza=%s...", total, workers
         )
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            list(ex.map(redact_doc, documents))
-        logger.info("Redaction PII completata")
+            results = list(ex.map(redact_doc, documents))
+
+        # Ritento i documenti falliti (sequenziale, per non ri-saturare).
+        failed = [doc for doc, ok in zip(documents, results) if not ok]
+        if failed:
+            logger.warning(
+                "PII: %s documenti falliti al 1o passaggio, ritento in sequenza...",
+                len(failed),
+            )
+            still_failed = 0
+            for doc in failed:
+                val = doc.get("content")
+                if not val:
+                    continue
+                try:
+                    doc["content"] = pii.redact(val, raise_on_error=True)
+                except Exception:
+                    still_failed += 1
+            if still_failed:
+                logger.error(
+                    "ATTENZIONE: %s documenti NON redatti dalla PII anche dopo "
+                    "retry. Il loro `content` potrebbe contenere dati personali.",
+                    still_failed,
+                )
+
+        logger.info(
+            "Redaction PII completata: %s occorrenze rimosse (%s valori, in "
+            "%s/%s ticket). Fallimenti totali (cumulati): %s",
+            pii.occurrences_masked, pii.values_masked, pii.docs_with_pii,
+            total, pii.failures,
+        )
+        # Espone i contatori per le statistiche finali del run.
+        self._pii_stats = dict(pii.stats)
 
     def run(
         self,
@@ -206,6 +263,11 @@ class Pipeline:
 
         # 3bis) Redaction PII (se attiva) - parallela sui campi recuperabili.
         self._apply_pii(documents)
+        pii_stats = getattr(self, "_pii_stats", None)
+        if pii_stats:
+            stats.pii_occurrences_masked = pii_stats.get("occurrences_masked", 0)
+            stats.pii_values_masked = pii_stats.get("values_masked", 0)
+            stats.pii_docs_with_pii = pii_stats.get("docs_with_pii", 0)
 
         if not documents:
             logger.info("Nessun documento da scrivere")

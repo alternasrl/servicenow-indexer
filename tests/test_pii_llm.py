@@ -23,7 +23,7 @@ class _FakeChatNS:
         self._outer = outer
         self.completions = self
 
-    def create(self, model, messages, temperature=0, response_format=None):
+    def create(self, model, messages, temperature=0, response_format=None, max_tokens=None):
         self._outer.last_messages = messages
         self._outer.last_model = model
         # Simula l'estrazione PII: ritorna JSON con i nomi noti trovati nel testo.
@@ -84,6 +84,16 @@ def test_llm_redactor_replaces_all_occurrences():
     out = r.redact("Mario Rossi ha aperto, poi Mario Rossi ha chiuso")
     assert "Mario Rossi" not in out
     assert out.count("[PII]") == 2
+
+
+def test_llm_redactor_counts_pii():
+    fake = FakeOpenAI()
+    r = LlmPiiRedactor("e", "k", "dep", client=fake)
+    r.redact("Mario Rossi ha aperto, poi Mario Rossi ha chiuso")
+    r.redact("nessun dato sensibile qui")
+    assert r.values_masked == 1          # un valore distinto: "Mario Rossi"
+    assert r.occurrences_masked == 2     # due occorrenze sostituite
+    assert r.docs_with_pii == 1          # solo il primo testo aveva PII
 
 
 def test_build_from_env_selects_llm(monkeypatch):
