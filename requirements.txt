@@ -11,6 +11,14 @@ openai>=1.30,<2
 # Conteggio token preciso per troncare l'input embedding (limite 8192 token)
 tiktoken>=0.7,<1
 
+# Redaction PII (opzionale, attivata da PII_REDACTION_ENABLED=true).
+# Richiede anche i modelli spaCy:
+#   python -m spacy download en_core_web_lg
+#   python -m spacy download it_core_news_lg
+presidio-analyzer>=2.2,<3
+presidio-anonymizer>=2.2,<3
+spacy>=3.7,<4
+
 # Watermark on Blob Storage (optional in dev, used in cloud)
 azure-storage-blob>=12.19,<13
 

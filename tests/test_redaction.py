@@ -62,3 +62,42 @@ def test_custom_rules_extension_point():
     out = redactor.redact("scrivi a mario.rossi@example.com per dettagli")
     assert "mario.rossi@example.com" not in out
     assert MASK in out
+
+
+# --- Integrazione PII (Presidio) con redactor fittizio ---
+
+class _FakePii:
+    """Finto PiiRedactor: maschera un nome noto, registra la lingua ricevuta."""
+
+    def __init__(self):
+        self.calls = []
+
+    def redact(self, text, language="it"):
+        self.calls.append(language)
+        return text.replace("Andrea Di Cosmo", "[PII]")
+
+
+def test_redactor_applies_pii_after_regex():
+    fake = _FakePii()
+    redactor = Redactor(pii_redactor=fake)
+    out = redactor.redact("Ticket gestito da Andrea Di Cosmo con password=Segreta1")
+    # regex maschera la password
+    assert "Segreta1" not in out
+    # PII maschera il nome
+    assert "Andrea Di Cosmo" not in out
+    assert "[PII]" in out
+
+
+def test_redactor_passes_language_to_pii():
+    fake = _FakePii()
+    redactor = Redactor(pii_redactor=fake)
+    redactor.redact("testo", language="en")
+    assert fake.calls == ["en"]
+
+
+def test_redactor_without_pii_is_regex_only():
+    # nessun pii_redactor -> comportamento invariato (solo regex)
+    redactor = Redactor()
+    out = redactor.redact("Andrea Di Cosmo ha risolto")
+    # senza PII il nome resta (lo gestira' Presidio se attivo)
+    assert "Andrea Di Cosmo" in out

@@ -55,24 +55,53 @@ DEFAULT_PATTERNS: List[RedactionRule] = [
 
 
 class Redactor:
-    """Applica una lista di regole di redaction a stringhe."""
+    """Applica la redaction a stringhe, in due stadi:
 
-    def __init__(self, rules: List[RedactionRule] | None = None) -> None:
+    1. regole REGEX (segreti con pattern fisso: password, connection string);
+    2. (opzionale) redaction PII via Presidio (nomi, email, telefoni, IBAN/CF).
+
+    Il secondo stadio si attiva solo se viene fornito un `pii_redactor`
+    (tipicamente costruito da env con PII_REDACTION_ENABLED=true). Se assente,
+    il comportamento e' identico alla sola redaction regex.
+    """
+
+    def __init__(
+        self,
+        rules: List[RedactionRule] | None = None,
+        pii_redactor=None,
+    ) -> None:
         self.rules = rules if rules is not None else DEFAULT_PATTERNS
+        self.pii_redactor = pii_redactor
 
-    def redact(self, text: str | None) -> str:
+    def redact(self, text: str | None, language: str = "it") -> str:
         if not text:
             return ""
         out = text
+        # Stadio 1: regex (sempre).
         for rule in self.rules:
             out = rule.pattern.sub(rule.replacement, out)
+        # Stadio 2: PII via Presidio (se configurato).
+        if self.pii_redactor is not None:
+            out = self.pii_redactor.redact(out, language=language)
         return out
 
 
 # Istanza di default riutilizzabile.
-default_redactor = Redactor()
+# Se PII_REDACTION_ENABLED e' attivo, aggancia anche la redaction PII.
+def _build_default_redactor() -> "Redactor":
+    pii = None
+    try:
+        from .pii import build_pii_redactor_from_env
+
+        pii = build_pii_redactor_from_env()
+    except Exception:  # pragma: no cover - pii e' opzionale
+        pii = None
+    return Redactor(pii_redactor=pii)
 
 
-def redact(text: str | None) -> str:
+default_redactor = _build_default_redactor()
+
+
+def redact(text: str | None, language: str = "it") -> str:
     """Helper modulo che usa il redactor di default."""
-    return default_redactor.redact(text)
+    return default_redactor.redact(text, language=language)
