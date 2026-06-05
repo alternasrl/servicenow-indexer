@@ -150,18 +150,137 @@ class PiiRedactor:
             return text
 
 
-def build_pii_redactor_from_env() -> Optional[PiiRedactor]:
-    """Crea un PiiRedactor se PII_REDACTION_ENABLED e' attivo, altrimenti None."""
+# --- Backend alternativo: LLM su Azure OpenAI / Foundry ---------------------
+
+# Prompt di sistema per il masking PII. Il modello deve restituire IL TESTO
+# IDENTICO con i soli dati personali sostituiti dal segnaposto, senza riassumere
+# ne' alterare il contenuto tecnico.
+LLM_PII_SYSTEM_PROMPT = """Sei un sistema di anonimizzazione PII per ticket di \
+help desk IT (Oracle). Ricevi un testo e devi restituire ESATTAMENTE lo stesso \
+testo, modificando SOLO i dati personali identificativi, che vanno sostituiti \
+con il segnaposto {mask}.
+
+Sostituisci con {mask}:
+- nomi e cognomi di persone (anche isolati, in italiano o inglese);
+- indirizzi email;
+- numeri di telefono;
+- IBAN e codici fiscali.
+
+NON modificare nient'altro. In particolare MANTIENI invariati: nomi di tabelle, \
+job, interfacce, codici prodotto, numeri di ticket (INC...), nomi di gruppi/team, \
+nomi di prodotti software, query SQL, date, importi, URL.
+NON riassumere, NON tradurre, NON aggiungere commenti. Restituisci unicamente il \
+testo anonimizzato."""
+
+
+class LlmPiiRedactor:
+    """Redaction PII tramite un LLM chat su Azure OpenAI / Foundry.
+
+    Vantaggi rispetto al NER: comprensione del contesto (nomi isolati, IT/EN),
+    nessun modello locale da distribuire (Function leggera). Caricamento lazy del
+    client; in caso di errore lascia il testo invariato (fail-safe) e logga.
+    """
+
+    def __init__(
+        self,
+        endpoint: str,
+        api_key: str,
+        deployment: str,
+        api_version: str = "2024-06-01",
+        mask: str = MASK,
+        client=None,
+        max_chars: int = 24000,
+    ) -> None:
+        self.endpoint = endpoint
+        self.api_key = api_key
+        self.deployment = deployment
+        self.api_version = api_version
+        self.mask = mask
+        self.max_chars = max_chars
+        self._client = client
+
+    def _ensure_client(self):
+        if self._client is None:
+            from openai import AzureOpenAI  # import lazy
+
+            self._client = AzureOpenAI(
+                azure_endpoint=self.endpoint,
+                api_key=self.api_key,
+                api_version=self.api_version,
+            )
+        return self._client
+
+    def redact(self, text: str | None, language: str = "it") -> str:
+        if not text:
+            return ""
+        # Testi molto lunghi: tronchiamo solo cio' che inviamo (sicurezza/costi).
+        # Il chiamante gestisce gia' la lunghezza dei campi salvati.
+        snippet = text if len(text) <= self.max_chars else text[: self.max_chars]
+        try:
+            client = self._ensure_client()
+            resp = client.chat.completions.create(
+                model=self.deployment,
+                temperature=0,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": LLM_PII_SYSTEM_PROMPT.format(mask=self.mask),
+                    },
+                    {"role": "user", "content": snippet},
+                ],
+            )
+            out = resp.choices[0].message.content
+            if not out:
+                return text
+            # Se abbiamo troncato, riappendiamo la coda non processata.
+            if len(text) > self.max_chars:
+                out = out + text[self.max_chars :]
+            return out
+        except Exception as exc:  # pragma: no cover - dipende dal servizio
+            logger.warning("Errore redaction PII via LLM, testo invariato: %s", exc)
+            return text
+
+
+def build_pii_redactor_from_env():
+    """Crea il redactor PII se PII_REDACTION_ENABLED e' attivo, altrimenti None.
+
+    Backend selezionabile con PII_BACKEND:
+    - "llm" (default): usa un modello chat Azure OpenAI/Foundry (PII_LLM_*);
+    - "presidio": usa Presidio + spaCy (NER locale).
+    """
     enabled = (os.environ.get("PII_REDACTION_ENABLED", "false") or "").strip().lower()
     if enabled not in ("1", "true", "yes"):
         return None
-    entities = _csv_env("PII_ENTITIES", DEFAULT_ENTITIES)
-    languages = _csv_env("PII_LANGUAGES", ["it", "en"])
-    thresholds = dict(DEFAULT_THRESHOLDS)
-    raw_person = os.environ.get("PII_PERSON_THRESHOLD")
-    if raw_person:
-        try:
-            thresholds["PERSON"] = float(raw_person)
-        except ValueError:
-            logger.warning("PII_PERSON_THRESHOLD non valido: %s", raw_person)
-    return PiiRedactor(entities=entities, languages=languages, thresholds=thresholds)
+
+    backend = (os.environ.get("PII_BACKEND", "llm") or "llm").strip().lower()
+
+    if backend == "presidio":
+        entities = _csv_env("PII_ENTITIES", DEFAULT_ENTITIES)
+        languages = _csv_env("PII_LANGUAGES", ["it", "en"])
+        thresholds = dict(DEFAULT_THRESHOLDS)
+        raw_person = os.environ.get("PII_PERSON_THRESHOLD")
+        if raw_person:
+            try:
+                thresholds["PERSON"] = float(raw_person)
+            except ValueError:
+                logger.warning("PII_PERSON_THRESHOLD non valido: %s", raw_person)
+        return PiiRedactor(entities=entities, languages=languages, thresholds=thresholds)
+
+    # default: LLM. Riusa per default le credenziali Azure OpenAI degli embedding.
+    endpoint = os.environ.get("PII_LLM_ENDPOINT") or os.environ.get("AOAI_ENDPOINT")
+    api_key = os.environ.get("PII_LLM_API_KEY") or os.environ.get("AOAI_API_KEY")
+    deployment = os.environ.get("PII_LLM_DEPLOYMENT", "gpt-4o-mini")
+    api_version = os.environ.get("PII_LLM_API_VERSION", "2024-06-01")
+    if not endpoint or not api_key:
+        logger.warning(
+            "PII backend 'llm' richiede PII_LLM_ENDPOINT/API_KEY (o AOAI_*). "
+            "Redaction PII DISATTIVATA."
+        )
+        return None
+    logger.info("PII backend: LLM Foundry (deployment=%s)", deployment)
+    return LlmPiiRedactor(
+        endpoint=endpoint,
+        api_key=api_key,
+        deployment=deployment,
+        api_version=api_version,
+    )

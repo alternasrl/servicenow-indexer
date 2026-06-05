@@ -1,6 +1,15 @@
-"""Test unitari sulla redaction."""
+"""Test unitari sulla redaction.
 
-from pipeline.redaction import MASK, Redactor, redact
+NB: usiamo un Redactor REGEX-ONLY esplicito (senza PII), non il redact() globale
+del modulo: quest'ultimo puo' agganciare il backend PII (LLM/Presidio) in base
+all'ambiente, rendendo i test non deterministici e dipendenti da servizi esterni.
+"""
+
+from pipeline.redaction import MASK, Redactor
+
+# Redactor con le sole regole regex di default (nessun backend PII).
+_rx = Redactor()
+redact = _rx.redact
 
 
 def test_password_assignment_equals():

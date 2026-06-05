@@ -1,5 +1,6 @@
 """Test sulla trasformazione record -> documento."""
 
+from pipeline.redaction import Redactor
 from pipeline.transform import (
     build_content,
     build_header,
@@ -9,6 +10,10 @@ from pipeline.transform import (
     transform_record,
     truncate_bytes,
 )
+
+# Redactor regex-only esplicito: i test sulla redaction non devono dipendere
+# dal backend PII (LLM/Presidio) eventualmente attivo via .env.
+_RX = Redactor()
 
 
 def test_truncate_bytes_limits_size():
@@ -109,26 +114,28 @@ def test_build_incident_url():
 
 
 def test_content_starts_with_ticket_header():
-    doc = transform_record(_record())
+    doc = transform_record(_record(), redactor=_RX)
     # il content deve aprire con l'header che cita il numero ticket
     assert doc["content"].startswith("Ticket INC0012345")
     assert "Gruppo: HD Oracle L2" in doc["content"]
 
 
 def test_transform_record_includes_url_with_base():
-    doc = transform_record(_record(), base_url="https://acme.service-now.com")
+    doc = transform_record(
+        _record(), redactor=_RX, base_url="https://acme.service-now.com"
+    )
     assert doc["url"].endswith("sys_id=abc123sysid")
     assert "Link: https://acme.service-now.com" in doc["content"]
 
 
 def test_transform_record_url_empty_without_base():
-    doc = transform_record(_record())
+    doc = transform_record(_record(), redactor=_RX)
     assert doc["url"] == ""
     assert "Link:" not in doc["content"]
 
 
 def test_transform_record_maps_fields_and_redacts():
-    doc = transform_record(_record())
+    doc = transform_record(_record(), redactor=_RX)
     assert doc["id"] == "INC0012345"
     assert doc["number"] == "INC0012345"
     # cmdb_ci non e' piu' indicizzato (sempre vuoto su Amplifon)
@@ -146,7 +153,7 @@ def test_transform_record_maps_fields_and_redacts():
 
 
 def test_transform_record_includes_and_redacts_journal_fields():
-    doc = transform_record(_record())
+    doc = transform_record(_record(), redactor=_RX)
     # work_notes e comments presenti e confluiti nel content
     assert "Note di lavorazione" in doc["content"]
     assert "Commenti" in doc["content"]
