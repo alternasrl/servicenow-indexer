@@ -12,6 +12,8 @@ Modalita':
 from __future__ import annotations
 
 import logging
+import os
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import List, Optional
 
@@ -53,10 +55,17 @@ class RunStats:
         }
 
 
+def _default_redactor() -> Redactor:
+    """Redactor con PII agganciata da env (se PII_REDACTION_ENABLED=true)."""
+    from .redaction import _build_default_redactor
+
+    return _build_default_redactor()
+
+
 @dataclass
 class Pipeline:
     config: AppConfig
-    redactor: Redactor = field(default_factory=Redactor)
+    redactor: Redactor = field(default_factory=_default_redactor)
     _sn_client: Optional[ServiceNowClient] = None
     _embed_client: Optional[EmbeddingClient] = None
     _writer: Optional[SearchWriter] = None
@@ -96,6 +105,42 @@ class Pipeline:
             self._watermark_store = build_watermark_store(self.config.state)
         return self._watermark_store
 
+    def _apply_pii(self, documents: List[dict]) -> None:
+        """Applica la redaction PII ai documenti, parallelizzata.
+
+        Per minimizzare le chiamate LLM si redige il SOLO campo `content` (1
+        chiamata per ticket): contiene gia' problema+descrizione+risoluzione+
+        journal, ed e' il campo vettorizzato e mostrato nelle citazioni. Gli
+        altri campi testuali sono resi non-recuperabili nello schema indice,
+        quindi non espongono PII grezza. No-op se la PII non e' attiva."""
+        pii = getattr(self.redactor, "pii_redactor", None)
+        if pii is None or not documents:
+            return
+        workers = int(os.environ.get("PII_CONCURRENCY", "16"))
+
+        # Pre-inizializza il client PRIMA del ThreadPool: il lazy-init concorrente
+        # serializzerebbe il primo batch di thread (ognuno crea il client).
+        ensure = getattr(pii, "_ensure_client", None)
+        if callable(ensure):
+            try:
+                ensure()
+            except Exception:  # pragma: no cover
+                pass
+
+        def redact_doc(doc: dict) -> None:
+            val = doc.get("content")
+            if val:
+                doc["content"] = pii.redact(val)
+
+        logger.info(
+            "Redaction PII (LLM) su %s documenti, concorrenza=%s...",
+            len(documents),
+            workers,
+        )
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            list(ex.map(redact_doc, documents))
+        logger.info("Redaction PII completata")
+
     def run(
         self,
         full: bool = False,
@@ -132,7 +177,9 @@ class Pipeline:
         # 2) Assicura l'indice (creazione se non esiste).
         self.index_manager.ensure_index()
 
-        # 3) Estrazione + trasformazione.
+        # 3) Estrazione + trasformazione (SOLO regex; la PII e' una fase a parte,
+        #    parallelizzata, perche' con backend LLM e' la fase piu' lenta).
+        regex_only = Redactor(rules=self.redactor.rules)  # niente PII qui
         documents: List[dict] = []
         new_watermark = stats.previous_watermark
         base_url = self.config.servicenow.base_url
@@ -140,7 +187,7 @@ class Pipeline:
             watermark=read_watermark, max_records=max_records
         ):
             stats.read += 1
-            doc = transform_record(record, self.redactor, base_url=base_url)
+            doc = transform_record(record, regex_only, base_url=base_url)
             updated_on = record_updated_on(record)
             new_watermark = max_watermark(new_watermark, updated_on)
             if not doc.get("content"):
@@ -156,6 +203,9 @@ class Pipeline:
             stats.transformed,
             stats.skipped_empty,
         )
+
+        # 3bis) Redaction PII (se attiva) - parallela sui campi recuperabili.
+        self._apply_pii(documents)
 
         if not documents:
             logger.info("Nessun documento da scrivere")

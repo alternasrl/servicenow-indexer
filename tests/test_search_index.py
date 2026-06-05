@@ -81,6 +81,19 @@ def test_journal_fields_not_retrievable():
         assert f["retrievable"] is False
 
 
+def test_description_resolution_not_retrievable():
+    # description/resolution: searchable per il full-text ma non recuperabili,
+    # cosi' il testo esposto e' solo `content` (redatto PII).
+    d = build_index_definition("idx", _embedding())
+    for name in ("description", "resolution"):
+        f = next(x for x in d["fields"] if x["name"] == name)
+        assert f["searchable"] is True
+        assert f["retrievable"] is False
+    # content resta recuperabile
+    content = next(x for x in d["fields"] if x["name"] == "content")
+    assert content["retrievable"] is True
+
+
 def test_searchconfig_requires_key_or_aad(monkeypatch):
     import pytest
 

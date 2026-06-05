@@ -23,12 +23,15 @@ class _FakeChatNS:
         self._outer = outer
         self.completions = self
 
-    def create(self, model, messages, temperature=0):
+    def create(self, model, messages, temperature=0, response_format=None):
         self._outer.last_messages = messages
         self._outer.last_model = model
-        # Simula il masking: sostituisce un nome noto.
+        # Simula l'estrazione PII: ritorna JSON con i nomi noti trovati nel testo.
+        import json
+
         user_text = messages[-1]["content"]
-        return _FakeCompletion(user_text.replace("Mario Rossi", "[PII]"))
+        found = [n for n in ("Mario Rossi", "Andrea Di Cosmo") if n in user_text]
+        return _FakeCompletion(json.dumps({"pii": found}))
 
 
 class FakeOpenAI:
@@ -74,13 +77,13 @@ def test_llm_redactor_failsafe_on_error():
     assert r.redact("Mario Rossi") == "Mario Rossi"
 
 
-def test_llm_redactor_appends_untruncated_tail():
+def test_llm_redactor_replaces_all_occurrences():
     fake = FakeOpenAI()
-    r = LlmPiiRedactor("e", "k", "dep", client=fake, max_chars=10)
-    text = "Mario Rossi" + "X" * 100  # supera max_chars
-    out = r.redact(text)
-    # la coda oltre max_chars viene riappesa invariata
-    assert out.endswith("X" * 100)
+    r = LlmPiiRedactor("e", "k", "dep", client=fake)
+    # un nome che compare piu' volte deve essere mascherato ovunque
+    out = r.redact("Mario Rossi ha aperto, poi Mario Rossi ha chiuso")
+    assert "Mario Rossi" not in out
+    assert out.count("[PII]") == 2
 
 
 def test_build_from_env_selects_llm(monkeypatch):

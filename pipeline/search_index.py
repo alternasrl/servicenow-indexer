@@ -57,22 +57,28 @@ def build_index_definition(index_name: str, embedding: EmbeddingConfig) -> Dict:
                 "retrievable": True,
             },
             {
+                # Titolo: recuperabile per le citazioni. Puo' contenere nomi, ma
+                # e' breve; la PII principale e' gestita su `content`.
                 "name": "short_description",
                 "type": "Edm.String",
                 "searchable": True,
                 "retrievable": True,
             },
             {
+                # Searchable per il full-text, NON recuperabile: il testo mostrato
+                # all'utente e' `content` (gia' redatto PII). Evita di esporre
+                # description grezza con eventuali nomi.
                 "name": "description",
                 "type": "Edm.String",
                 "searchable": True,
-                "retrievable": True,
+                "retrievable": False,
             },
             {
+                # Come description: searchable ma non recuperabile.
                 "name": "resolution",
                 "type": "Edm.String",
                 "searchable": True,
-                "retrievable": True,
+                "retrievable": False,
             },
             {
                 # Note interne tecniche: searchable ma NON recuperabili

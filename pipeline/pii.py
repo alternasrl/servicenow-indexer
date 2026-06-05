@@ -152,25 +152,25 @@ class PiiRedactor:
 
 # --- Backend alternativo: LLM su Azure OpenAI / Foundry ---------------------
 
-# Prompt di sistema per il masking PII. Il modello deve restituire IL TESTO
-# IDENTICO con i soli dati personali sostituiti dal segnaposto, senza riassumere
-# ne' alterare il contenuto tecnico.
-LLM_PII_SYSTEM_PROMPT = """Sei un sistema di anonimizzazione PII per ticket di \
-help desk IT (Oracle). Ricevi un testo e devi restituire ESATTAMENTE lo stesso \
-testo, modificando SOLO i dati personali identificativi, che vanno sostituiti \
-con il segnaposto {mask}.
+# Prompt "estrai, non riscrivere": l'LLM restituisce SOLO la lista dei valori
+# PII trovati (JSON), che vengono poi sostituiti localmente. Cosi' l'output e'
+# di pochi token (veloce, economico, niente rischio di alterare il testo).
+LLM_PII_SYSTEM_PROMPT = """Sei un estrattore di dati personali (PII) da ticket di \
+help desk IT (Oracle). Ricevi un testo e devi restituire un oggetto JSON con la \
+lista ESATTA dei valori PII presenti nel testo, da anonimizzare.
 
-Sostituisci con {mask}:
+Includi in "pii" (copiando il valore esatto come appare nel testo):
 - nomi e cognomi di persone (anche isolati, in italiano o inglese);
 - indirizzi email;
 - numeri di telefono;
 - IBAN e codici fiscali.
 
-NON modificare nient'altro. In particolare MANTIENI invariati: nomi di tabelle, \
-job, interfacce, codici prodotto, numeri di ticket (INC...), nomi di gruppi/team, \
-nomi di prodotti software, query SQL, date, importi, URL.
-NON riassumere, NON tradurre, NON aggiungere commenti. Restituisci unicamente il \
-testo anonimizzato."""
+NON includere (NON sono PII): nomi di tabelle, job, interfacce, codici prodotto, \
+numeri di ticket (INC...), nomi di gruppi/team, prodotti software, parole comuni, \
+date, importi, URL.
+
+Rispondi SOLO con JSON valido nel formato: {{"pii": ["valore1", "valore2", ...]}}. \
+Se non ci sono PII, rispondi {{"pii": []}}."""
 
 
 class LlmPiiRedactor:
@@ -210,35 +210,43 @@ class LlmPiiRedactor:
             )
         return self._client
 
+    def _extract_pii(self, text: str) -> list:
+        """Chiede all'LLM la lista dei valori PII presenti nel testo (JSON)."""
+        import json
+
+        client = self._ensure_client()
+        resp = client.chat.completions.create(
+            model=self.deployment,
+            temperature=0,
+            response_format={"type": "json_object"},
+            messages=[
+                {"role": "system", "content": LLM_PII_SYSTEM_PROMPT.format(mask=self.mask)},
+                {"role": "user", "content": text},
+            ],
+        )
+        content = resp.choices[0].message.content or "{}"
+        data = json.loads(content)
+        values = data.get("pii", []) if isinstance(data, dict) else []
+        # Solo stringhe non vuote, deduplicate, ordinate per lunghezza decrescente
+        # (sostituisco prima i valori piu' lunghi: evita match parziali).
+        uniq = {v for v in values if isinstance(v, str) and v.strip()}
+        return sorted(uniq, key=len, reverse=True)
+
     def redact(self, text: str | None, language: str = "it") -> str:
         if not text:
             return ""
-        # Testi molto lunghi: tronchiamo solo cio' che inviamo (sicurezza/costi).
-        # Il chiamante gestisce gia' la lunghezza dei campi salvati.
         snippet = text if len(text) <= self.max_chars else text[: self.max_chars]
         try:
-            client = self._ensure_client()
-            resp = client.chat.completions.create(
-                model=self.deployment,
-                temperature=0,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": LLM_PII_SYSTEM_PROMPT.format(mask=self.mask),
-                    },
-                    {"role": "user", "content": snippet},
-                ],
-            )
-            out = resp.choices[0].message.content
-            if not out:
-                return text
-            # Se abbiamo troncato, riappendiamo la coda non processata.
-            if len(text) > self.max_chars:
-                out = out + text[self.max_chars :]
-            return out
+            pii_values = self._extract_pii(snippet)
         except Exception as exc:  # pragma: no cover - dipende dal servizio
-            logger.warning("Errore redaction PII via LLM, testo invariato: %s", exc)
+            logger.warning("Errore estrazione PII via LLM, testo invariato: %s", exc)
             return text
+        if not pii_values:
+            return text
+        out = text
+        for value in pii_values:
+            out = out.replace(value, self.mask)
+        return out
 
 
 def build_pii_redactor_from_env():
