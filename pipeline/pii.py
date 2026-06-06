@@ -190,6 +190,8 @@ class LlmPiiRedactor:
         mask: str = MASK,
         client=None,
         max_chars: int = 24000,
+        reasoning_effort: Optional[str] = None,
+        max_completion_tokens: int = 4000,
     ) -> None:
         self.endpoint = endpoint
         self.api_key = api_key
@@ -197,6 +199,11 @@ class LlmPiiRedactor:
         self.api_version = api_version
         self.mask = mask
         self.max_chars = max_chars
+        # Parametri specifici dei modelli reasoning gpt-5 (es. gpt-5-mini):
+        # usano max_completion_tokens (non max_tokens), non accettano temperature
+        # custom, e accettano reasoning_effort (minimal = veloce per estrazione).
+        self.reasoning_effort = reasoning_effort
+        self.max_completion_tokens = max_completion_tokens
         self._injected_client = client  # client esplicito (test): condiviso
         # Contatori thread-safe (la redaction gira in parallelo).
         import threading
@@ -242,28 +249,41 @@ class LlmPiiRedactor:
     def _extract_pii(self, text: str) -> list:
         """Chiede all'LLM la lista dei valori PII presenti nel testo (JSON).
 
-        max_tokens ampio per non troncare l'output (l'errore 'Unterminated string'
-        nasceva da risposte JSON tagliate su testi con moltissimi PII).
+        Usa max_completion_tokens (compatibile sia coi modelli gpt-4o sia coi
+        reasoning gpt-5) e, se configurato, reasoning_effort. Niente temperature
+        custom (i gpt-5 la rifiutano).
         """
         import json
 
         client = self._ensure_client()
-        resp = client.chat.completions.create(
+        kwargs = dict(
             model=self.deployment,
-            temperature=0,
-            max_tokens=4096,
+            max_completion_tokens=self.max_completion_tokens,
             response_format={"type": "json_object"},
             messages=[
                 {"role": "system", "content": LLM_PII_SYSTEM_PROMPT.format(mask=self.mask)},
                 {"role": "user", "content": text},
             ],
         )
+        if self.reasoning_effort:
+            kwargs["reasoning_effort"] = self.reasoning_effort
+        resp = client.chat.completions.create(**kwargs)
         content = resp.choices[0].message.content or "{}"
         data = json.loads(content)
-        values = data.get("pii", []) if isinstance(data, dict) else []
-        # Solo stringhe non vuote, deduplicate, ordinate per lunghezza decrescente
-        # (sostituisco prima i valori piu' lunghi: evita match parziali).
-        uniq = {v for v in values if isinstance(v, str) and v.strip()}
+        raw = data.get("pii", []) if isinstance(data, dict) else []
+        # Parsing tollerante: i valori possono essere stringhe oppure dict
+        # {"type":..., "value":...} (gpt-5-mini a volte risponde cosi').
+        values = []
+        for item in raw:
+            if isinstance(item, str):
+                values.append(item)
+            elif isinstance(item, dict):
+                v = item.get("value") or item.get("text") or item.get("pii")
+                if isinstance(v, str):
+                    values.append(v)
+        # Deduplicate, ordina per lunghezza decrescente (prima i valori piu'
+        # lunghi: evita match parziali).
+        uniq = {v for v in values if v and v.strip()}
         return sorted(uniq, key=len, reverse=True)
 
     class RedactionError(RuntimeError):
@@ -330,16 +350,24 @@ def build_pii_redactor_from_env():
     api_key = os.environ.get("PII_LLM_API_KEY") or os.environ.get("AOAI_API_KEY")
     deployment = os.environ.get("PII_LLM_DEPLOYMENT", "gpt-4o-mini")
     api_version = os.environ.get("PII_LLM_API_VERSION", "2024-06-01")
+    # reasoning_effort: per i modelli gpt-5 (es. "minimal"). Vuoto = non inviato.
+    reasoning_effort = os.environ.get("PII_LLM_REASONING_EFFORT") or None
+    max_completion_tokens = int(os.environ.get("PII_LLM_MAX_COMPLETION_TOKENS", "4000"))
     if not endpoint or not api_key:
         logger.warning(
             "PII backend 'llm' richiede PII_LLM_ENDPOINT/API_KEY (o AOAI_*). "
             "Redaction PII DISATTIVATA."
         )
         return None
-    logger.info("PII backend: LLM Foundry (deployment=%s)", deployment)
+    logger.info(
+        "PII backend: LLM Foundry (deployment=%s, reasoning_effort=%s)",
+        deployment, reasoning_effort,
+    )
     return LlmPiiRedactor(
         endpoint=endpoint,
         api_key=api_key,
         deployment=deployment,
         api_version=api_version,
+        reasoning_effort=reasoning_effort,
+        max_completion_tokens=max_completion_tokens,
     )

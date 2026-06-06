@@ -23,9 +23,14 @@ class _FakeChatNS:
         self._outer = outer
         self.completions = self
 
-    def create(self, model, messages, temperature=0, response_format=None, max_tokens=None):
+    def create(self, model, messages, response_format=None, max_completion_tokens=None,
+               reasoning_effort=None, **kwargs):
         self._outer.last_messages = messages
         self._outer.last_model = model
+        self._outer.last_kwargs = {
+            "max_completion_tokens": max_completion_tokens,
+            "reasoning_effort": reasoning_effort,
+        }
         # Simula l'estrazione PII: ritorna JSON con i nomi noti trovati nel testo.
         import json
 
@@ -94,6 +99,26 @@ def test_llm_redactor_counts_pii():
     assert r.values_masked == 1          # un valore distinto: "Mario Rossi"
     assert r.occurrences_masked == 2     # due occorrenze sostituite
     assert r.docs_with_pii == 1          # solo il primo testo aveva PII
+
+
+def test_llm_redactor_parses_dict_items():
+    # gpt-5-mini a volte ritorna [{"type":..., "value":...}] invece di stringhe.
+    class DictChat:
+        def __init__(self, outer):
+            self.completions = self
+        def create(self, model, messages, response_format=None,
+                   max_completion_tokens=None, reasoning_effort=None, **kw):
+            import json
+            return _FakeCompletion(json.dumps(
+                {"pii": [{"type": "name", "value": "Mario Rossi"}]}
+            ))
+    class DictClient:
+        def __init__(self):
+            self.chat = DictChat(self)
+    r = LlmPiiRedactor("e", "k", "gpt-5-mini", client=DictClient())
+    out = r.redact("ticket di Mario Rossi")
+    assert "Mario Rossi" not in out
+    assert "[PII]" in out
 
 
 def test_build_from_env_selects_llm(monkeypatch):
