@@ -212,6 +212,10 @@ class LlmPiiRedactor:
         # Client PER-THREAD: evita il deadlock dell'httpx connection pool quando
         # un singolo client viene condiviso tra molti thread sotto retry/429.
         self._tlocal = threading.local()
+        # Watchdog per-chiamata: il timeout del client httpx a volte NON scatta
+        # (socket appeso su Windows) e congela la fase PII. Eseguiamo la chiamata
+        # in un thread separato con join(timeout): se sfora, abbandona e ritenta.
+        self._call_timeout = float(os.environ.get("PII_CALL_TIMEOUT_S", "45"))
         self.values_masked = 0  # quanti VALORI PII distinti mascherati
         self.occurrences_masked = 0  # quante OCCORRENZE totali sostituite
         self.docs_with_pii = 0  # quanti documenti contenevano PII
@@ -246,7 +250,7 @@ class LlmPiiRedactor:
             self._tlocal.client = client
         return client
 
-    def _extract_pii(self, text: str) -> list:
+    def _extract_pii(self, text: str, client=None) -> list:
         """Chiede all'LLM la lista dei valori PII presenti nel testo (JSON).
 
         Usa max_completion_tokens (compatibile sia coi modelli gpt-4o sia coi
@@ -255,7 +259,7 @@ class LlmPiiRedactor:
         """
         import json
 
-        client = self._ensure_client()
+        client = client or self._ensure_client()
         kwargs = dict(
             model=self.deployment,
             max_completion_tokens=self.max_completion_tokens,
@@ -289,12 +293,45 @@ class LlmPiiRedactor:
     class RedactionError(RuntimeError):
         """Sollevata quando la redaction PII fallisce (testo NON redatto)."""
 
+    def _extract_pii_watchdog(self, text: str) -> list:
+        """Esegue _extract_pii in un thread con timeout (join).
+
+        Se la chiamata si appende oltre il timeout, il thread viene abbandonato
+        (daemon, muore col processo), il client thread-local viene invalidato e
+        si solleva TimeoutError: la fase PII non puo' piu' congelarsi.
+        """
+        import threading
+
+        # Client del thread chiamante (riusato tra le chiamate dello stesso
+        # worker), passato al daemon per non crearne uno nuovo ad ogni chiamata.
+        client = self._ensure_client()
+        box = {}
+
+        def work():
+            try:
+                box["v"] = self._extract_pii(text, client=client)
+            except Exception as exc:  # noqa
+                box["e"] = exc
+
+        t = threading.Thread(target=work, daemon=True)
+        t.start()
+        t.join(self._call_timeout)
+        if t.is_alive():
+            # chiamata appesa: il client e' probabilmente compromesso -> lo
+            # invalido per il thread chiamante (la prossima chiamata ne crea uno
+            # nuovo) e segnalo timeout.
+            self._tlocal.client = None
+            raise TimeoutError(f"estrazione PII appesa > {self._call_timeout}s")
+        if "e" in box:
+            raise box["e"]
+        return box.get("v", [])
+
     def redact(self, text: str | None, language: str = "it", raise_on_error: bool = False) -> str:
         if not text:
             return ""
         snippet = text if len(text) <= self.max_chars else text[: self.max_chars]
         try:
-            pii_values = self._extract_pii(snippet)
+            pii_values = self._extract_pii_watchdog(snippet)
         except Exception as exc:
             with self._lock:
                 self.failures += 1
