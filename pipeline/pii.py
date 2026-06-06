@@ -197,11 +197,14 @@ class LlmPiiRedactor:
         self.api_version = api_version
         self.mask = mask
         self.max_chars = max_chars
-        self._client = client
+        self._injected_client = client  # client esplicito (test): condiviso
         # Contatori thread-safe (la redaction gira in parallelo).
         import threading
 
         self._lock = threading.Lock()
+        # Client PER-THREAD: evita il deadlock dell'httpx connection pool quando
+        # un singolo client viene condiviso tra molti thread sotto retry/429.
+        self._tlocal = threading.local()
         self.values_masked = 0  # quanti VALORI PII distinti mascherati
         self.occurrences_masked = 0  # quante OCCORRENZE totali sostituite
         self.docs_with_pii = 0  # quanti documenti contenevano PII
@@ -217,19 +220,24 @@ class LlmPiiRedactor:
         }
 
     def _ensure_client(self):
-        if self._client is None:
+        # Test: client iniettato e condiviso.
+        if self._injected_client is not None:
+            return self._injected_client
+        # Produzione: un client per THREAD (connection pool isolato).
+        client = getattr(self._tlocal, "client", None)
+        if client is None:
             from openai import AzureOpenAI  # import lazy
 
-            # timeout + retry alti: i 429 (rate limit) vanno assorbiti con backoff,
-            # NON lasciati cadere (lascerebbero testo non redatto = PII esposta).
-            self._client = AzureOpenAI(
+            # timeout duro (la richiesta non resta appesa) + retry sui 429.
+            client = AzureOpenAI(
                 azure_endpoint=self.endpoint,
                 api_key=self.api_key,
                 api_version=self.api_version,
-                timeout=60.0,
-                max_retries=8,
+                timeout=30.0,
+                max_retries=6,
             )
-        return self._client
+            self._tlocal.client = client
+        return client
 
     def _extract_pii(self, text: str) -> list:
         """Chiede all'LLM la lista dei valori PII presenti nel testo (JSON).
