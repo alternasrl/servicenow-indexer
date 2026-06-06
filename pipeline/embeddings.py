@@ -10,30 +10,27 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from typing import Iterable, List
 
 from .config import EmbeddingConfig
 
 logger = logging.getLogger(__name__)
 
+# Watchdog: una singola chiamata embedding non puo' durare piu' di tot secondi.
+# Il timeout del client httpx a volte NON scatta (socket appeso su Windows);
+# questo watchdog abbandona la chiamata, ricrea il client e ritenta.
+EMBED_CALL_WATCHDOG_S = 90
+EMBED_MAX_ATTEMPTS = 4
+
 
 class EmbeddingClient:
     def __init__(self, config: EmbeddingConfig, client=None) -> None:
         self.config = config
-        if client is not None:
-            self._client = client
-        else:
-            from openai import AzureOpenAI  # import lazy
-
-            # timeout esplicito + retry: evita hang infiniti come quello osservato
-            # in un run (chiamata embedding rimasta appesa per ore).
-            self._client = AzureOpenAI(
-                azure_endpoint=config.endpoint,
-                api_key=config.api_key,
-                api_version=config.api_version,
-                timeout=60.0,
-                max_retries=5,
-            )
+        self._injected = client is not None
+        self._client = client or self._new_client()
+        # Executor mono-thread riutilizzato per il watchdog sulle chiamate.
+        self._watchdog = ThreadPoolExecutor(max_workers=1)
         # Encoder per il conteggio token reale (tiktoken). Se non disponibile,
         # si ricade sul troncamento per caratteri.
         self._encoding = None
@@ -50,6 +47,17 @@ class EmbeddingClient:
                 "tiktoken non disponibile: troncamento embedding per caratteri "
                 "(meno preciso)."
             )
+
+    def _new_client(self):
+        from openai import AzureOpenAI  # import lazy
+
+        return AzureOpenAI(
+            azure_endpoint=self.config.endpoint,
+            api_key=self.config.api_key,
+            api_version=self.config.api_version,
+            timeout=60.0,
+            max_retries=5,
+        )
 
     def _truncate(self, text: str) -> str:
         """Tronca il testo al limite di token ammesso dall'embedding.
@@ -69,15 +77,41 @@ class EmbeddingClient:
             return text[:limit]
         return text
 
-    def _embed_batch(self, texts: List[str]) -> List[List[float]]:
-        response = self._client.embeddings.create(
+    def _raw_embed(self, inputs: List[str]):
+        return self._client.embeddings.create(
             model=self.config.deployment,
-            input=[self._truncate(t) for t in texts],
+            input=inputs,
             dimensions=self.config.dimensions,
         )
-        # L'API garantisce l'ordine, ma ordiniamo per index per sicurezza.
-        items = sorted(response.data, key=lambda d: d.index)
-        return [item.embedding for item in items]
+
+    def _embed_batch(self, texts: List[str]) -> List[List[float]]:
+        inputs = [self._truncate(t) for t in texts]
+        last_exc = None
+        for attempt in range(1, EMBED_MAX_ATTEMPTS + 1):
+            future = self._watchdog.submit(self._raw_embed, inputs)
+            try:
+                response = future.result(timeout=EMBED_CALL_WATCHDOG_S)
+                items = sorted(response.data, key=lambda d: d.index)
+                return [item.embedding for item in items]
+            except FuturesTimeout:
+                # La chiamata e' appesa oltre il watchdog: abbandona il thread
+                # (resta a morire da solo), ricrea il client e ritenta.
+                last_exc = TimeoutError(
+                    f"embedding batch appeso > {EMBED_CALL_WATCHDOG_S}s"
+                )
+                logger.warning(
+                    "Embedding appeso (tentativo %s/%s): ricreo il client e ritento",
+                    attempt, EMBED_MAX_ATTEMPTS,
+                )
+                if not self._injected:
+                    self._client = self._new_client()
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "Embedding errore (tentativo %s/%s): %s",
+                    attempt, EMBED_MAX_ATTEMPTS, str(exc)[:160],
+                )
+        raise RuntimeError(f"Embedding batch fallito dopo {EMBED_MAX_ATTEMPTS} tentativi: {last_exc}")
 
     def embed_documents(self, documents: Iterable[dict]) -> List[dict]:
         """Aggiunge `contentVector` ai documenti con content non vuoto.
