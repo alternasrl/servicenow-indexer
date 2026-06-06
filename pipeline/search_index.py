@@ -276,42 +276,82 @@ class SearchIndexManager:
         logger.info("Indice '%s' aggiornato (schema)", self.search.index_name)
 
 
+# Watchdog scrittura: una upload-batch non puo' durare piu' di tot secondi
+# (il socket HTTP puo' appendersi su Windows). Oltre, ricrea il client e ritenta.
+WRITE_BATCH_WATCHDOG_S = 120
+WRITE_MAX_ATTEMPTS = 4
+
+
 class SearchWriter:
     """Scrittura upsert idempotente via SDK (merge_or_upload_documents)."""
 
     def __init__(self, search: SearchConfig, client=None, credential=None) -> None:
         self.search = search
-        if client is not None:
-            self._client = client
+        self._credential = credential
+        self._injected = client is not None
+        self._client = client or self._new_client()
+        from concurrent.futures import ThreadPoolExecutor
+
+        self._watchdog = ThreadPoolExecutor(max_workers=1)
+
+    def _new_client(self):
+        from azure.search.documents import SearchClient
+
+        if self.search.use_aad:
+            cred = self._credential
+            if cred is None:
+                from azure.identity import DefaultAzureCredential
+
+                cred = DefaultAzureCredential()
+                self._credential = cred
         else:
-            from azure.search.documents import SearchClient
+            from azure.core.credentials import AzureKeyCredential
 
-            if search.use_aad:
-                if credential is None:
-                    from azure.identity import DefaultAzureCredential
+            cred = AzureKeyCredential(self.search.admin_key)
+        return SearchClient(
+            endpoint=self.search.endpoint,
+            index_name=self.search.index_name,
+            credential=cred,
+        )
 
-                    credential = DefaultAzureCredential()
-                cred = credential
-            else:
-                from azure.core.credentials import AzureKeyCredential
-
-                cred = AzureKeyCredential(search.admin_key)
-
-            self._client = SearchClient(
-                endpoint=search.endpoint,
-                index_name=search.index_name,
-                credential=cred,
-            )
+    def _upload_batch(self, batch):
+        return self._client.merge_or_upload_documents(documents=batch)
 
     def upsert(self, documents: List[dict]) -> int:
-        """Scrive i documenti a batch. Ritorna il numero di documenti scritti."""
+        """Scrive i documenti a batch, con watchdog per evitare hang infiniti."""
         if not documents:
             return 0
+        from concurrent.futures import TimeoutError as FuturesTimeout
+
         written = 0
         batch_size = self.search.write_batch_size
         for start in range(0, len(documents), batch_size):
             batch = documents[start : start + batch_size]
-            results = self._client.merge_or_upload_documents(documents=batch)
+            results = None
+            last_exc = None
+            for attempt in range(1, WRITE_MAX_ATTEMPTS + 1):
+                fut = self._watchdog.submit(self._upload_batch, batch)
+                try:
+                    results = fut.result(timeout=WRITE_BATCH_WATCHDOG_S)
+                    break
+                except FuturesTimeout:
+                    last_exc = TimeoutError(
+                        f"upload batch appeso > {WRITE_BATCH_WATCHDOG_S}s"
+                    )
+                    logger.warning(
+                        "Scrittura appesa (tentativo %s/%s): ricreo client e ritento",
+                        attempt, WRITE_MAX_ATTEMPTS,
+                    )
+                    if not self._injected:
+                        self._client = self._new_client()
+                except Exception as exc:
+                    last_exc = exc
+                    logger.warning(
+                        "Scrittura errore (tentativo %s/%s): %s",
+                        attempt, WRITE_MAX_ATTEMPTS, str(exc)[:160],
+                    )
+            if results is None:
+                raise RuntimeError(f"Batch non scritto dopo i retry: {last_exc}")
             failed = [r for r in results if not r.succeeded]
             if failed:
                 for r in failed:
